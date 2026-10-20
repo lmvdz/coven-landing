@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import handler from './site-stats.js';
+import handler from '../../api/site-stats.js';
 
 const release = {
   tag_name: 'v1.0.0',

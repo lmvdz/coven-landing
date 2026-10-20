@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import handler from './download.js';
-import { resolvePlatformRelease, RELEASES_PAGE } from './_shared.js';
+import handler from '../../api/download.js';
+import { resolvePlatformRelease, RELEASES_PAGE } from '../../api/_shared.js';
 
 const makeRelease = (tag, names, extra = {}) => ({
   tag_name: tag,
