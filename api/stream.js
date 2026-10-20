@@ -19,34 +19,23 @@
 //
 // Routed via vercel.json rewrites: /stream/:platform → /api/stream?platform=:platform
 
-import { MATCHERS, RELEASES_PAGE, REPO, WINDOWS_FALLBACK_TAG, pickAsset } from './_shared.js';
+import { MATCHERS, RELEASES_PAGE, resolvePlatformRelease, pickAsset } from './_shared.js';
 
 export const config = { runtime: 'edge' };
 
-// Module-scope memo of the latest-release lookup. Edge isolates persist
-// across requests, so warm traffic skips the GitHub API (60 req/hr
-// unauthenticated) entirely; a GITHUB_TOKEN env var raises the limit.
-let releaseCache = { at: 0, release: null };
-const RELEASE_TTL_MS = 5 * 60 * 1000;
-
-async function latestRelease() {
-  if (releaseCache.release && Date.now() - releaseCache.at < RELEASE_TTL_MS) {
-    return releaseCache.release;
-  }
-  const headers = {
-    Accept: 'application/vnd.github+json',
-    'User-Agent': 'opencoven-landing',
-  };
-  if (process.env.GITHUB_TOKEN) {
-    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-  }
-  const response = await fetch(
-    `https://api.github.com/repos/${REPO}/releases/latest`,
-    { headers },
-  );
-  if (!response.ok) throw new Error(`GitHub API ${response.status}`);
-  const release = await response.json();
-  releaseCache = { at: Date.now(), release };
+// Cache successful platform resolutions only, for five minutes.
+const releaseCache = new Map();
+async function latestRelease(platform) {
+  const cached = releaseCache.get(platform);
+  if (cached && Date.now() - cached.at < 300000) return cached.release;
+  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'opencoven-landing' };
+  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const release = await resolvePlatformRelease(platform, async (path) => {
+    const response = await fetch(`https://api.github.com${path}`, { headers, signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+    return response.json();
+  });
+  releaseCache.set(platform, { at: Date.now(), release });
   return release;
 }
 
@@ -57,15 +46,8 @@ export default async function handler(request) {
   }
 
   try {
-    const release = await latestRelease();
-    let asset = pickAsset(release.assets, platform);
-    if (!asset && platform === 'windows') {
-      const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'opencoven-landing' };
-      if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-      const fallback = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/${WINDOWS_FALLBACK_TAG}`, { headers });
-      if (!fallback.ok) throw new Error(`Windows fallback ${fallback.status}`);
-      asset = pickAsset((await fallback.json()).assets, platform);
-    }
+    const release = await latestRelease(platform);
+    const asset = pickAsset(release.assets, platform);
     if (!asset || !asset.browser_download_url) {
       throw new Error(`no asset for ${platform}`);
     }

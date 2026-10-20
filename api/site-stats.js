@@ -9,15 +9,22 @@
 // aggregate to everyone (s-maxage 2h, a day of stale-while-revalidate).
 // Honours GITHUB_TOKEN if configured, same as api/download.js.
 
-import { REPO, WINDOWS_FALLBACK_TAG } from './_shared.js';
+import { REPO, platformReleases, pickAsset } from './_shared.js';
 
 const ORG = 'OpenCoven';
 const GUILD_ID = '1469169435095990448';
 const INSTALLER = /\.(dmg|msi|AppImage|exe|deb|rpm)$/i;
 
 async function gh(path, headers) {
-  const r = await fetch(`https://api.github.com${path}`, { headers });
-  return r.ok ? r.json() : null;
+  try {
+    const r = await fetch(`https://api.github.com${path}`, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+    return r.ok ? await r.json() : null;
+  } catch {
+    return null;
+  }
 }
 
 export default async function handler(req, res) {
@@ -30,9 +37,9 @@ export default async function handler(req, res) {
   }
 
   const out = {
-    stars: 0,
+    stars: null,
     starSplit: [],
-    downloads: 0,
+    downloads: null,
     release: null,
     hasAttestation: false,
     discord: null,
@@ -49,13 +56,19 @@ export default async function handler(req, res) {
   }
 
   // installs: cumulative across every release; signatures/updater bundles excluded
+  let downloads = 0;
+  const history = [];
   for (let page = 1; page <= 5; page++) {
     const rels = await gh(`/repos/${REPO}/releases?per_page=100&page=${page}`, headers);
     if (!Array.isArray(rels)) break;
-    out.downloads += rels.reduce((sum, rel) => sum + ((rel.assets || []).reduce((n, a) => (
+    history.push(...rels);
+    downloads += rels.reduce((sum, rel) => sum + ((rel.assets || []).reduce((n, a) => (
       INSTALLER.test(a.name) ? n + (Number(a.download_count) || 0) : n
     ), 0)), 0);
-    if (rels.length < 100) break;
+    if (rels.length < 100) {
+      out.downloads = downloads;
+      break;
+    }
   }
 
   // latest release, trimmed to the fields the artifact rows use
@@ -63,27 +76,20 @@ export default async function handler(req, res) {
   if (latest) {
     out.release = {
       tag_name: latest.tag_name || '',
-      assets: (latest.assets || []).map((a) => ({
+      assets: [],
+    };
+    for (const [platform, release] of Object.entries(platformReleases(latest, history))) {
+      if (!release) continue;
+      const installer = pickAsset(release.assets, platform);
+      const assets = release.assets.filter((a) => a.name === installer.name || a.name === `${installer.name}.sig`);
+      out.release.assets.push(...assets.map((a) => ({
         name: a.name,
         size: a.size,
         browser_download_url: a.browser_download_url,
         download_count: a.download_count,
         digest: typeof a.digest === 'string' ? a.digest : '',
-      })),
-    };
-    if (!out.release.assets.some((a) => /_x64_.*\.msi$/.test(a.name))) {
-      const windows = await gh(`/repos/${REPO}/releases/tags/${WINDOWS_FALLBACK_TAG}`, headers);
-      const fallbackAssets = (windows && windows.assets || []).filter((a) => /_x64_.*\.msi(\.sig)?$/.test(a.name));
-      if (fallbackAssets.some((a) => a.name.endsWith('.msi'))) {
-        out.release.windows_tag = WINDOWS_FALLBACK_TAG;
-        out.release.assets.push(...fallbackAssets.map((a) => ({
-          name: a.name,
-          size: a.size,
-          browser_download_url: a.browser_download_url,
-          download_count: a.download_count,
-          digest: typeof a.digest === 'string' ? a.digest : '',
-        })));
-      }
+        release_tag: release.tag_name || '',
+      })));
     }
     const arm = out.release.assets.find((a) => /-aarch64\.dmg$/.test(a.name));
     if (arm && arm.digest) {
@@ -107,7 +113,12 @@ export default async function handler(req, res) {
     }
   } catch (err) { /* proof row hides itself when absent */ }
 
-  res.setHeader('Cache-Control', 'public, s-maxage=7200, stale-while-revalidate=86400');
+  // Never cache a failed/partial GitHub lookup as public proof. In particular,
+  // a rate-limited response must not hide downloads for the entire CDN window.
+  const complete = out.stars !== null && out.downloads !== null && out.release !== null;
+  res.setHeader('Cache-Control', complete
+    ? 'public, s-maxage=7200, stale-while-revalidate=86400'
+    : 'no-store');
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(out));
 }

@@ -17,33 +17,9 @@
 // regardless of asset size. Deployed by CI on push to main — see
 // .github/workflows/deploy-download-worker.yml.
 
-const REPO = 'OpenCoven/coven-cave';
-const RELEASES_PAGE = `https://github.com/${REPO}/releases/latest`;
-const WINDOWS_FALLBACK_TAG = 'v0.5.7'; // Keep in sync with api/_shared.js.
+import { MATCHERS, RELEASES_PAGE, pickAsset, resolvePlatformRelease } from '../../../api/_shared.js';
+export { MATCHERS, pickAsset };
 const USER_AGENT = 'opencoven-download-worker';
-
-// platform → predicate that picks its installer asset from the release.
-// Mirrors api/download.js in the landing repo; `.sig` sidecars excluded.
-export const MATCHERS = {
-  mac: (n) => n.endsWith('.dmg') && /aarch64|arm64/i.test(n),
-  'mac-intel': (n) => n.endsWith('.dmg') && /x86_64|x64|intel/i.test(n),
-  windows: (n) => n.endsWith('.msi'),
-  linux: (n) => n.endsWith('.AppImage'),
-};
-
-export function pickAsset(assets, platform) {
-  const match = MATCHERS[platform];
-  if (!match || !Array.isArray(assets)) return null;
-  return (
-    assets.find(
-      (asset) =>
-        asset &&
-        typeof asset.name === 'string' &&
-        !asset.name.endsWith('.sig') &&
-        match(asset.name),
-    ) ?? null
-  );
-}
 
 // "https://*.vercel.app" → wildcard subdomain, "http://localhost:*" →
 // wildcard port. Everything else must match exactly.
@@ -82,20 +58,15 @@ async function resolveAsset(platform, env) {
   };
   if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
 
-  // Edge-cache the release lookup so real traffic almost never reaches
-  // the (60 req/hr unauthenticated) GitHub API.
-  const response = await fetch(
-    `https://api.github.com/repos/${REPO}/releases/latest`,
-    { headers, cf: { cacheTtl: 300, cacheEverything: true } },
-  );
-  if (!response.ok) throw new Error(`GitHub API ${response.status}`);
-  const release = await response.json();
-  let asset = pickAsset(release.assets, platform);
-  if (!asset && platform === 'windows') {
-    const fallback = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/${WINDOWS_FALLBACK_TAG}`, { headers });
-    if (!fallback.ok) throw new Error(`Windows fallback ${fallback.status}`);
-    asset = pickAsset((await fallback.json()).assets, platform);
-  }
+  const release = await resolvePlatformRelease(platform, async (path) => {
+    const response = await fetch(`https://api.github.com${path}`, {
+      headers, signal: AbortSignal.timeout(8000),
+      cf: { cacheTtlByStatus: { '200-299': 300, '400-599': 0 } },
+    });
+    if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+    return response.json();
+  });
+  const asset = pickAsset(release.assets, platform);
   if (!asset || !asset.browser_download_url) {
     throw new Error(`no asset for ${platform}`);
   }

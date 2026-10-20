@@ -12,7 +12,7 @@
 // We cache the 302 at the Vercel CDN (s-maxage) so real traffic almost
 // never reaches GitHub, and honour GITHUB_TOKEN if one is configured.
 
-import { MATCHERS, RELEASES_PAGE, REPO, WINDOWS_FALLBACK_TAG } from './_shared.js';
+import { MATCHERS, RELEASES_PAGE, pickAsset, resolvePlatformRelease } from './_shared.js';
 
 export default async function handler(req, res) {
   const platform = String(req.query.platform || '').toLowerCase();
@@ -35,18 +35,14 @@ export default async function handler(req, res) {
       headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
     }
 
-    const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers });
-    if (!resp.ok) throw new Error(`GitHub API ${resp.status}`);
-
-    const release = await resp.json();
-    let assets = Array.isArray(release.assets) ? release.assets : [];
-    let asset = assets.find((a) => a && typeof a.name === 'string' && !a.name.endsWith('.sig') && match(a.name));
-    if (!asset && platform === 'windows') {
-      const fallback = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/${WINDOWS_FALLBACK_TAG}`, { headers });
-      if (!fallback.ok) throw new Error(`Windows fallback ${fallback.status}`);
-      assets = (await fallback.json()).assets || [];
-      asset = assets.find((a) => a && typeof a.name === 'string' && !a.name.endsWith('.sig') && match(a.name));
-    }
+    const release = await resolvePlatformRelease(platform, async (path) => {
+      const response = await fetch(`https://api.github.com${path}`, {
+        headers, signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+      return response.json();
+    });
+    const asset = pickAsset(release.assets, platform);
 
     if (!asset || !asset.browser_download_url) throw new Error(`no asset for ${platform}`);
 

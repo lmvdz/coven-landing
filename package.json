@@ -10,7 +10,8 @@
     "preview": "astro preview --host 127.0.0.1 --port 4173",
     "astro": "astro",
     "check": "node scripts/verify-static.mjs",
-    "check:browser": "playwright test"
+    "check:browser": "playwright test",
+    "test:unit": "node --test api/*.test.js workers/download-proxy/test/worker.test.mjs"
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.7.3",

@@ -1,5 +1,12 @@
 import { test, expect } from '@playwright/test';
 
+test('Hexi avatar asset loads from the built public site', async ({ page }) => {
+  await page.goto('/');
+  const avatar = page.locator('img[src="/assets/opencoven-mark.svg"]').first();
+  await expect(avatar).toHaveJSProperty('complete', true);
+  await expect.poll(() => avatar.evaluate((img) => (img as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+});
+
 // Browser checks for the redesign. The preview server has no /api functions,
 // so behaviors fed by /api/site-stats or /stream are asserted in their
 // graceful fallback states; production behavior is covered by the api/
@@ -20,7 +27,7 @@ test('landing renders the hero and adapts the download button', async ({ page })
   const btn = page.locator('[data-dl-btn]').first();
   await expect(btn).toBeVisible();
   await expect(btn.locator('[data-dl-label]')).toHaveText('Download Cave for Linux');
-  await expect(btn).toHaveAttribute('data-dl-url', '/stream/linux');
+  await expect(btn).toHaveAttribute('href', '/download/linux');
 });
 
 test('the braid assembles after idle boot', async ({ page }) => {

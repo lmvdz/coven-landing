@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, landing]
   pull_request:
-    branches: [main]
+    branches: [main, landing]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -43,5 +43,15 @@ jobs:
       - name: Verify static output
         run: pnpm check
 
+      - name: Verify release resolution and stats failure handling
+        run: pnpm test:unit
+
       - name: Verify browser interactions
-        run: pnpm check:browser
+        run: |
+          if [ "${{ github.base_ref || github.ref_name }}" = "landing" ]; then
+            # The production branch ships the redesign. The retained Reforged
+            # suite targets its retired predecessor, not the current homepage.
+            pnpm exec playwright test tests/redesign.spec.ts tests/quickstart.spec.ts tests/download-evidence.spec.ts
+          else
+            pnpm check:browser
+          fi

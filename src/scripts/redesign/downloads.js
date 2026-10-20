@@ -1,155 +1,8 @@
-// The download suite: platform-aware primary button, streaming with progress
-// via the same-origin /stream proxy, tabbed platform menu with real release
-// artifacts from /api/site-stats, copy-to-clipboard, and graceful fallbacks
-// (proxy down or rate-limited → browser-native download of the pinned asset).
-
+// Browser-native downloads; release metadata only enhances the artifact menu.
 import { register } from './actions.js';
-
-let dlBusy = false;
-let dlReader = null;
-let dlCancelled = false;
 let dlAway = null;
 let dlEsc = null;
 let copyT = null;
-const timers = [];
-
-const later = (fn, ms) => { const id = setTimeout(fn, ms); timers.push(id); return id; };
-
-export function fmtMB(bytes) {
-  return (bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0) + ' MB';
-}
-
-function setDl(btn, state, info) {
-  const q = (s) => btn.querySelector(s);
-  const fill = q('[data-dl-fill]');
-  const label = q('[data-dl-label]');
-  const spin = q('[data-dl-spin]');
-  const check = q('[data-dl-check]');
-  const scope = btn.closest('[data-dl-scope]') || document;
-  const status = scope.querySelector('[data-dl-status]');
-  const caption = scope.querySelector('[data-dl-caption]');
-  btn.dataset.dlState = state;
-
-  if (spin) spin.style.display = state === 'connecting' ? 'block' : 'none';
-  if (check) check.style.display = state === 'done' ? 'block' : 'none';
-  if (caption) caption.style.display = state === 'idle' ? 'flex' : 'none';
-  if (status) status.style.display = state === 'idle' ? 'none' : 'flex';
-  const busy = state === 'connecting' || state === 'progress';
-  btn.style.cursor = 'pointer';
-  if (busy) btn.setAttribute('aria-busy', 'true');
-  else btn.removeAttribute('aria-busy');
-
-  if (state === 'connecting') {
-    if (fill) fill.style.width = '0%';
-    if (label) label.textContent = 'Preparing your download';
-    if (status) { status.textContent = 'Contacting the release host'; status.style.color = 'var(--cv-text-muted)'; }
-    return;
-  }
-  if (state === 'progress') {
-    const pct = info.total ? Math.min(100, (info.got / info.total) * 100) : 0;
-    if (fill) fill.style.width = pct.toFixed(1) + '%';
-    if (label) label.textContent = info.total ? Math.round(pct) + '% · downloading' : 'downloading';
-    if (status) {
-      const secs = (Date.now() - info.t0) / 1000;
-      const rate = secs > 0.35 ? info.got / secs : 0;
-      const left = rate && info.total ? Math.max(0, (info.total - info.got) / rate) : 0;
-      status.textContent = (info.total
-          ? fmtMB(info.got) + ' / ' + fmtMB(info.total)
-            + (left > 0.6 ? ' · ' + Math.ceil(left) + 's left' : ' · almost there')
-          : fmtMB(info.got) + ' downloaded') + ' · click to cancel';
-      status.style.color = 'var(--cv-text-secondary)';
-    }
-    return;
-  }
-  if (state === 'done') {
-    if (fill) fill.style.width = '100%';
-    if (label) label.textContent = 'Saved to your Downloads';
-    if (status) {
-      const named = btn.dataset.dlName || 'the disk image';
-      status.textContent = 'Open ' + named + ' → drag Cave to Applications → run coven init in your repo';
-      status.style.color = 'var(--cv-success)';
-    }
-    later(() => { dlBusy = false; setDl(btn, 'idle'); }, 11000);
-    return;
-  }
-  if (state === 'error') {
-    if (fill) fill.style.width = '0%';
-    if (label) label.textContent = 'Retry download';
-    if (status) { status.textContent = 'The connection dropped before the file finished'; status.style.color = 'var(--cv-danger)'; }
-    dlBusy = false;
-    return;
-  }
-  if (fill) fill.style.width = '0%';
-  if (label) label.textContent = btn.dataset.dlLabel || 'Download Cave for macOS';
-}
-
-async function streamDownload(btn) {
-  const t0 = Date.now();
-  let started = false;
-  try {
-    const res = await fetch(btn.dataset.dlUrl);
-    if (!res.ok || !res.body) throw new Error('no stream');
-    // needs Access-Control-Expose-Headers: Content-Length on the release origin
-    const total = Number(res.headers.get('Content-Length')) || Number(res.headers.get('X-File-Size')) || 0;
-    const reader = res.body.getReader();
-    dlReader = reader;
-    const chunks = [];
-    let got = 0;
-    started = true;
-    for (;;) {
-      const step = await reader.read();
-      if (step.done) break;
-      chunks.push(step.value);
-      got += step.value.length;
-      setDl(btn, 'progress', { got, total, t0 });
-    }
-    dlReader = null;
-    if (dlCancelled) {
-      dlCancelled = false;
-      dlBusy = false;
-      setDl(btn, 'idle');
-      return;
-    }
-    const href = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
-    const a = document.createElement('a');
-    a.href = href;
-    a.download = btn.dataset.dlName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(href);
-    setDl(btn, 'done');
-  } catch (err) {
-    dlReader = null;
-    if (dlCancelled) {
-      dlCancelled = false;
-      dlBusy = false;
-      setDl(btn, 'idle');
-      return;
-    }
-    if (started) { setDl(btn, 'error'); return; }
-    // Streaming unavailable (CORS, proxy down, rate limit): hand the click to
-    // the browser so the visitor still gets the real installer.
-    dlBusy = false;
-    setDl(btn, 'idle');
-    location.assign(btn.dataset.dlHref || btn.dataset.dlUrl || '/download/mac');
-  }
-}
-
-function startDownload(e) {
-  const btn = e.currentTarget;
-  if (dlBusy) {
-    // second click cancels the in-flight stream
-    if (dlReader) {
-      dlCancelled = true;
-      dlReader.cancel().catch(() => {});
-    }
-    return;
-  }
-  dlBusy = true;
-  setDl(btn, 'connecting');
-  streamDownload(btn);
-}
 
 function pickPlatform(e) {
   // the tab lives inside the menu, so the outside-click closer must not see this
@@ -288,29 +141,6 @@ export function loadArtifacts() {
       const rel = d && d.release;
       const assets = (rel && rel.assets) || [];
       if (!assets.length) return;
-      const tag = rel.tag_name || '';
-      if (tag) document.querySelectorAll('[data-art-ver]').forEach((el) => { el.textContent = tag; });
-      if (rel.windows_tag) {
-        document.querySelectorAll('[data-dl-pane="windows"] [data-art-ver]').forEach((el) => { el.textContent = rel.windows_tag; });
-      }
-      // the primary button hands out the visitor's platform build (Apple silicon by default)
-      const os = detectOs();
-      const primaryMatch = os === 'windows' ? /_x64_.*\.msi$/ : os === 'linux' ? /_amd64\.AppImage$/ : /-aarch64\.dmg$/;
-      const primaryLabel = os === 'windows' ? 'Download Cave for Windows' : os === 'linux' ? 'Download Cave for Linux' : 'Download Cave for macOS';
-      const primary = assets.find((a) => primaryMatch.test(a.name) && !/\.sig$/.test(a.name));
-      if (primary) {
-        document.querySelectorAll('[data-dl-btn]').forEach((btn) => {
-          // stream same-origin so progress works (direct GitHub fetch dies on
-          // CORS); keep the direct URL as the browser-navigation fallback
-          btn.dataset.dlUrl = '/stream/' + os;
-          btn.dataset.dlHref = primary.browser_download_url;
-          btn.dataset.dlName = primary.name;
-          btn.dataset.dlSize = String(primary.size);
-          btn.dataset.dlLabel = primaryLabel;
-          const l = btn.querySelector('[data-dl-label]');
-          if (l && !btn.dataset.dlState) l.textContent = primaryLabel;
-        });
-      }
       // provenance answered server-side (cached attestation lookup)
       if (d && d.hasAttestation) {
         document.querySelectorAll('[data-art-prov-block]').forEach((el) => { el.style.display = 'flex'; });
@@ -321,24 +151,32 @@ export function loadArtifacts() {
         const sig = asset && assets.find((a) => a.name === asset.name + '.sig');
         const digest = asset && typeof asset.digest === 'string' ? asset.digest : '';
         document.querySelectorAll('[data-art="' + spec.slot + '"]').forEach((row) => {
-          if (!asset) { row.style.display = 'none'; return; }
+          if (!asset) return;
           row.setAttribute('href', asset.browser_download_url);
+          row.dataset.releaseTag = asset.release_tag || rel.tag_name || '';
           const f = row.querySelector('[data-art-file]');
           if (f) f.textContent = asset.name;
           const sz = row.querySelector('[data-art-size]');
           if (sz) sz.textContent = (asset.size / 1048576).toFixed(1).replace(/\.0$/, '') + ' MB';
         });
         document.querySelectorAll('[data-art-verify="' + spec.slot + '"]').forEach((btn) => {
-          if (!asset) return;
+          if (!asset || !digest) { btn.style.display = 'none'; return; }
+          btn.style.display = 'flex';
           btn.setAttribute('data-copy', spec.cmd(asset.name));
           const h = btn.querySelector('[data-art-hash]');
           if (h && digest) h.textContent = digest.slice(0, digest.startsWith('sha256:') ? 24 : 17) + '…';
         });
         document.querySelectorAll('[data-art-sig="' + spec.slot + '"]').forEach((link) => {
-          if (sig) link.setAttribute('href', sig.browser_download_url);
+          if (sig) { link.setAttribute('href', sig.browser_download_url); link.style.display = 'inline-flex'; }
           else link.style.display = 'none';
         });
       });
+      document.querySelectorAll('[data-dl-pane]').forEach((pane) => {
+        const versions = [...new Set([...pane.querySelectorAll('[data-release-tag]')].map((row) => row.dataset.releaseTag).filter(Boolean))];
+        const label = pane.querySelector('[data-art-ver]');
+        if (label && versions.length) label.textContent = versions.join(' / ');
+      });
+
     })
     .then(() => fitMenus())
     .catch(() => {});
@@ -350,11 +188,8 @@ export function adaptPlatform() {
   const os = detectOs();
   if (os === 'mac') return;
   const label = os === 'windows' ? 'Download Cave for Windows' : 'Download Cave for Linux';
-  const name = os === 'windows' ? 'Coven-Cave.msi' : 'Coven-Cave.AppImage';
   document.querySelectorAll('[data-dl-btn]').forEach((btn) => {
-    if (btn.dataset.dlHref) return; // loadArtifacts already landed real data
-    btn.setAttribute('data-dl-url', '/stream/' + os);
-    btn.setAttribute('data-dl-name', name);
+    btn.setAttribute('href', '/download/' + os);
     if (!btn.dataset.dlLabel) btn.dataset.dlLabel = label;
     const l = btn.querySelector('[data-dl-label]');
     if (l && !btn.dataset.dlState) l.textContent = label;
@@ -362,7 +197,6 @@ export function adaptPlatform() {
 }
 
 export function initDownloads() {
-  register('startDownload', startDownload);
   register('toggleDownloads', toggleDownloads);
   register('pickPlatform', pickPlatform);
   register('copy', copy);
